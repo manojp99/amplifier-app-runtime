@@ -266,6 +266,9 @@ class ManagedSession:
             # Register spawn capability for agent delegation
             register_spawn_capability(session, prepared_bundle, self._spawn_manager)
 
+            # Register host-defined tools
+            await self._register_host_tools(session)
+
             # Restore transcript if provided
             if initial_transcript:
                 await self._restore_transcript(session, initial_transcript)
@@ -323,6 +326,36 @@ class ManagedSession:
                 logger.warning("Context module not found or doesn't support set_messages()")
         except Exception as e:
             logger.error(f"Failed to restore transcript: {e}")
+
+    async def _register_host_tools(self, session: Any) -> None:
+        """Register host-defined tools on this session.
+
+        Host tools are transport-agnostic tools registered by the host application.
+        They are available to all sessions regardless of transport (stdio, HTTP, etc.).
+
+        Args:
+            session: The AmplifierSession to register tools on
+        """
+        from .host_tools import host_tool_registry, register_host_tools_on_session
+
+        if host_tool_registry.count == 0:
+            logger.debug(f"No host tools registered for session {self.session_id}")
+            return
+
+        try:
+            registered = await register_host_tools_on_session(
+                session=session,
+                registry=host_tool_registry,
+                session_id=self.session_id,
+                cwd=self.metadata.cwd,
+            )
+            if registered:
+                logger.info(
+                    f"Registered {len(registered)} host tools on session {self.session_id}: "
+                    f"{', '.join(registered)}"
+                )
+        except Exception as e:
+            logger.warning(f"Failed to register host tools on session {self.session_id}: {e}")
 
     async def execute(self, prompt: str) -> AsyncIterator[Event]:
         """Execute a prompt and stream results.

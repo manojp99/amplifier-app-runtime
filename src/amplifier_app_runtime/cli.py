@@ -107,6 +107,17 @@ def _save_env_var(env_file: Any, var_name: str, value: str) -> None:
 @click.option("--acp", "acp_enabled", is_flag=True, help="Enable ACP endpoints (HTTP mode)")
 @click.option("--health", "health_check", is_flag=True, help="Check HTTP server health and exit")
 @click.option("--health-url", default="http://localhost:4096", help="Server URL for health check")
+@click.option(
+    "--host-tools",
+    "host_tools_path",
+    type=click.Path(exists=True),
+    help="Path to YAML file defining host tools",
+)
+@click.option(
+    "--host-tools-module",
+    "host_tools_module",
+    help="Python module containing host tool definitions (e.g., myapp.tools)",
+)
 @click.pass_context
 def main(
     ctx: click.Context,
@@ -117,6 +128,8 @@ def main(
     acp_enabled: bool,
     health_check: bool,
     health_url: str,
+    host_tools_path: str | None,
+    host_tools_module: str | None,
 ) -> None:
     """Amplifier Runtime - AI agent server for IDE integrations.
 
@@ -154,11 +167,107 @@ def main(
         _do_health_check(health_url)
         return
 
+    # Load host tools if specified
+    if host_tools_path or host_tools_module:
+        _load_host_tools(host_tools_path, host_tools_module)
+
     # Run in appropriate mode
     if http_mode:
         _run_http_server(host, port, reload, acp_enabled)
     else:
         _run_stdio_server()
+
+
+def _load_host_tools(yaml_path: str | None, module_name: str | None) -> None:
+    """Load host tools from YAML file or Python module.
+
+    Args:
+        yaml_path: Path to YAML file defining tools
+        module_name: Python module containing tool definitions
+    """
+    from .host_tools import HostToolDefinition, host_tool_registry
+
+    tools_loaded = 0
+
+    # Load from YAML file
+    if yaml_path:
+        import importlib
+
+        import yaml
+
+        click.echo(f"Loading host tools from {yaml_path}", err=True)
+
+        with open(yaml_path) as f:
+            config = yaml.safe_load(f)
+
+        tools_config = config.get("tools", [])
+        for tool_config in tools_config:
+            name = tool_config.get("name")
+            description = tool_config.get("description", "")
+            parameters = tool_config.get("parameters", {"type": "object"})
+            module_path = tool_config.get("module")
+            function_name = tool_config.get("function")
+
+            if not all([name, module_path, function_name]):
+                click.echo(
+                    f"Skipping incomplete tool definition: {tool_config}",
+                    err=True,
+                )
+                continue
+
+            try:
+                # Import the handler function
+                mod = importlib.import_module(module_path)
+                handler = getattr(mod, function_name)
+
+                # Register the tool
+                definition = HostToolDefinition(
+                    name=name,
+                    description=description,
+                    parameters=parameters,
+                    handler=handler,
+                    requires_approval=tool_config.get("requires_approval", False),
+                    timeout=tool_config.get("timeout"),
+                    category=tool_config.get("category"),
+                )
+                asyncio.run(host_tool_registry.register(definition))
+                tools_loaded += 1
+                click.echo(f"  Registered: {name}", err=True)
+
+            except Exception as e:
+                click.echo(f"  Failed to load {name}: {e}", err=True)
+
+    # Load from Python module
+    if module_name:
+        import importlib
+
+        click.echo(f"Loading host tools from module {module_name}", err=True)
+
+        try:
+            # Import the module - this will trigger any @host_tool decorators
+            mod = importlib.import_module(module_name)
+
+            # Look for a setup function
+            if hasattr(mod, "setup_host_tools"):
+                setup_fn = mod.setup_host_tools
+                if asyncio.iscoroutinefunction(setup_fn):
+                    asyncio.run(setup_fn(host_tool_registry))
+                else:
+                    setup_fn(host_tool_registry)
+
+            # Count tools registered
+            tools_loaded = host_tool_registry.count
+            click.echo(f"  Module loaded, {tools_loaded} tools registered", err=True)
+
+        except ImportError as e:
+            click.echo(f"Failed to import module {module_name}: {e}", err=True)
+            sys.exit(1)
+        except Exception as e:
+            click.echo(f"Error loading tools from {module_name}: {e}", err=True)
+            sys.exit(1)
+
+    if tools_loaded > 0:
+        click.echo(f"Total host tools loaded: {tools_loaded}", err=True)
 
 
 def _do_health_check(url: str) -> None:
