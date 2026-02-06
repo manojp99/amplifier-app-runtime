@@ -105,6 +105,8 @@ def _save_env_var(env_file: Any, var_name: str, value: str) -> None:
 @click.option("--port", default=4096, help="Port to bind to (HTTP mode)")
 @click.option("--reload", is_flag=True, help="Enable auto-reload for development (HTTP mode)")
 @click.option("--acp", "acp_enabled", is_flag=True, help="Enable ACP endpoints (HTTP mode)")
+@click.option("--storage-dir", default=None, help="Custom directory for session storage")
+@click.option("--no-persist", is_flag=True, help="Disable session persistence to disk")
 @click.option("--health", "health_check", is_flag=True, help="Check HTTP server health and exit")
 @click.option("--health-url", default="http://localhost:4096", help="Server URL for health check")
 @click.option(
@@ -126,6 +128,8 @@ def main(
     port: int,
     reload: bool,
     acp_enabled: bool,
+    storage_dir: str | None,
+    no_persist: bool,
     health_check: bool,
     health_url: str,
     host_tools_path: str | None,
@@ -173,9 +177,9 @@ def main(
 
     # Run in appropriate mode
     if http_mode:
-        _run_http_server(host, port, reload, acp_enabled)
+        _run_http_server(host, port, reload, acp_enabled, storage_dir, no_persist)
     else:
-        _run_stdio_server()
+        _run_stdio_server(storage_dir, no_persist)
 
 
 def _load_host_tools(yaml_path: str | None, module_name: str | None) -> None:
@@ -290,7 +294,14 @@ def _do_health_check(url: str) -> None:
     asyncio.run(check())
 
 
-def _run_http_server(host: str, port: int, reload: bool, acp_enabled: bool) -> None:
+def _run_http_server(
+    host: str,
+    port: int,
+    reload: bool,
+    acp_enabled: bool,
+    storage_dir: str | None = None,
+    no_persist: bool = False,
+) -> None:
     """Run HTTP server mode."""
     import os
 
@@ -305,6 +316,14 @@ def _run_http_server(host: str, port: int, reload: bool, acp_enabled: bool) -> N
         os.environ.pop("AMPLIFIER_ACP_ENABLED", None)
         click.echo(f"Starting Amplifier runtime on http://{host}:{port}", err=True)
 
+    # Pass storage configuration via environment variables
+    if storage_dir:
+        os.environ["AMPLIFIER_STORAGE_DIR"] = storage_dir
+        click.echo(f"  Session storage: {storage_dir}", err=True)
+    if no_persist:
+        os.environ["AMPLIFIER_NO_PERSIST"] = "1"
+        click.echo("  Session persistence: disabled", err=True)
+
     click.echo("Press Ctrl+C to stop", err=True)
 
     uvicorn.run(
@@ -316,13 +335,21 @@ def _run_http_server(host: str, port: int, reload: bool, acp_enabled: bool) -> N
     )
 
 
-def _run_stdio_server() -> None:
+def _run_stdio_server(storage_dir: str | None = None, no_persist: bool = False) -> None:
     """Run stdio server mode (default).
 
     Uses native Amplifier protocol over stdin/stdout (JSON lines).
     For ACP protocol, use --http --acp instead.
     """
+    import os
+
     from .stdio import run_native_stdio
+
+    # Pass storage configuration via environment variables
+    if storage_dir:
+        os.environ["AMPLIFIER_STORAGE_DIR"] = storage_dir
+    if no_persist:
+        os.environ["AMPLIFIER_NO_PERSIST"] = "1"
 
     try:
         asyncio.run(run_native_stdio())

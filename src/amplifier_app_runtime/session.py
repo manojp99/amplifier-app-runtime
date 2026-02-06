@@ -667,7 +667,27 @@ class SessionManager:
         Args:
             store: Optional session store for persistence
         """
-        self._store = store or SessionStore()
+        import os
+        from pathlib import Path
+
+        # Check for configuration via environment variables
+        no_persist = os.environ.get("AMPLIFIER_NO_PERSIST") == "1"
+        storage_dir = os.environ.get("AMPLIFIER_STORAGE_DIR")
+
+        # Priority order: explicit parameter > env vars > defaults
+        if store:
+            # Explicit store takes precedence over env vars (for testing/custom implementations)
+            self._store = store
+        elif no_persist:
+            # Disable persistence entirely
+            self._store = None
+        elif storage_dir:
+            # Use custom storage directory
+            self._store = SessionStore(storage_dir=Path(storage_dir))
+        else:
+            # Default behavior (unchanged)
+            self._store = SessionStore()
+
         self._active: dict[str, ManagedSession] = {}
         self._bundle_manager: Any = None
         self._lock = asyncio.Lock()
@@ -772,6 +792,10 @@ class SessionManager:
                 session.set_send_function(send_fn)
             return session
 
+        # If persistence disabled, cannot resume from storage
+        if not self._store:
+            return None
+
         # Try to load from storage
         metadata = self._store.load_metadata(session_id)
         if not metadata:
@@ -845,7 +869,7 @@ class SessionManager:
 
         # Optionally delete from storage
         deleted = False
-        if delete_saved:
+        if delete_saved and self._store:
             deleted = self._store.delete_session(session_id)
 
         if deleted:
@@ -875,14 +899,15 @@ class SessionManager:
             info["is_active"] = True
             sessions.append(info)
 
-        # Add saved sessions from storage
-        saved = self._store.list_sessions(limit=limit)
-        for saved_info in saved:
-            session_id = saved_info.get("session_id")
-            if session_id not in self._active:
-                saved_info["is_active"] = False
-                if include_completed or saved_info.get("state") != "completed":
-                    sessions.append(saved_info)
+        # Add saved sessions from storage (if persistence enabled)
+        if self._store:
+            saved = self._store.list_sessions(limit=limit)
+            for saved_info in saved:
+                session_id = saved_info.get("session_id")
+                if session_id not in self._active:
+                    saved_info["is_active"] = False
+                    if include_completed or saved_info.get("state") != "completed":
+                        sessions.append(saved_info)
 
         # Sort by updated_at descending
         sessions.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
@@ -907,6 +932,8 @@ class SessionManager:
         Returns:
             List of saved session info dicts
         """
+        if not self._store:
+            return []
         return self._store.list_sessions(min_turns=min_turns, limit=limit)
 
     def get_session_info(self, session_id: str) -> dict[str, Any] | None:
@@ -924,11 +951,12 @@ class SessionManager:
             info["active"] = True
             return info
 
-        # Check storage
-        saved = self._store.load_metadata(session_id)
-        if saved:
-            saved["active"] = False
-            return saved
+        # Check storage (if persistence enabled)
+        if self._store:
+            saved = self._store.load_metadata(session_id)
+            if saved:
+                saved["active"] = False
+                return saved
 
         return None
 
@@ -1007,8 +1035,8 @@ class SessionManager:
         return len(to_remove)
 
     @property
-    def store(self) -> SessionStore:
-        """Get the session store."""
+    def store(self) -> SessionStore | None:
+        """Get the session store (None if persistence disabled)."""
         return self._store
 
 

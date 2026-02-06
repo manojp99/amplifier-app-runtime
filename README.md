@@ -64,6 +64,12 @@ amplifier-runtime --http --acp
 
 # Development mode with auto-reload
 amplifier-runtime --http --reload
+
+# Custom session storage directory (for multi-tenant apps)
+amplifier-runtime --http --storage-dir /app/data/sessions
+
+# Disable persistence (memory-only sessions)
+amplifier-runtime --http --no-persist
 ```
 
 **Endpoints (HTTP mode):**
@@ -85,6 +91,47 @@ amplifier-runtime --health
 amplifier-runtime --health --health-url http://localhost:8080
 ```
 
+## Session Storage Configuration
+
+Control where and how sessions are persisted:
+
+### Custom Storage Directory
+
+```bash
+# Store sessions in a custom location
+amplifier-runtime --http --storage-dir /app/data/sessions
+
+# Or via environment variable
+export AMPLIFIER_STORAGE_DIR=/app/data/sessions
+amplifier-runtime --http
+```
+
+**Use cases:**
+- Multi-tenant applications: Separate storage per tenant
+- Docker/Kubernetes: Mount persistent volumes at custom paths
+- Testing: Isolated test storage
+
+### Disable Persistence
+
+```bash
+# Run without any filesystem storage (memory only)
+amplifier-runtime --http --no-persist
+
+# Or via environment variable
+export AMPLIFIER_NO_PERSIST=1
+amplifier-runtime --http
+```
+
+**Use cases:**
+- Stateless deployments (sessions managed by your backend)
+- Development/testing (no disk I/O overhead)
+- Privacy-sensitive environments (no local data retention)
+
+**Note:** When persistence is disabled:
+- Sessions exist only in memory
+- `session resume` will not work
+- Sessions are lost on runtime restart
+
 ## CLI Reference
 
 ```
@@ -93,6 +140,10 @@ amplifier-runtime --http              # HTTP server mode
 amplifier-runtime --http --port 8080  # HTTP with custom port
 amplifier-runtime --http --acp        # HTTP with ACP endpoints
 amplifier-runtime --health            # Check HTTP server health
+
+# Storage options
+amplifier-runtime --http --storage-dir /custom/path    # Custom storage
+amplifier-runtime --http --no-persist                  # Disable persistence
 
 amplifier-runtime session list        # List saved sessions
 amplifier-runtime session info <id>   # Show session details
