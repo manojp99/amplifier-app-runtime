@@ -9,12 +9,10 @@ import os
 from typing import Any
 
 from rich.console import Console
-from rich.prompt import Confirm
-from rich.prompt import Prompt
+from rich.prompt import Confirm, Prompt
 
 from .key_manager import KeyManager
-from .provider_loader import get_provider_info
-from .provider_loader import get_provider_models
+from .provider_loader import get_provider_info, get_provider_models
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -49,9 +47,7 @@ def _prompt_model_selection(
                 "  [dim](No models found on Ollama server. Run 'ollama pull <model>' to install models.)[/dim]"
             )
         elif provider_id in ("vllm", "provider-vllm"):
-            console.print(
-                "  [dim](Could not connect to vLLM server or no models available.)[/dim]"
-            )
+            console.print("  [dim](Could not connect to vLLM server or no models available.)[/dim]")
         else:
             console.print("  [dim](No models discovered from server.)[/dim]")
         model = Prompt.ask("Model name", default=default_model or "")
@@ -69,11 +65,7 @@ def _prompt_model_selection(
         # Show display name and capabilities if available
         caps = ""
         if hasattr(model_info, "capabilities") and model_info.capabilities:
-            key_caps = [
-                c
-                for c in model_info.capabilities
-                if c in ("fast", "thinking", "vision")
-            ]
+            key_caps = [c for c in model_info.capabilities if c in ("fast", "thinking", "vision")]
             if key_caps:
                 caps = f" ({', '.join(key_caps)})"
         console.print(f"  [{idx}] {model_info.display_name}{caps}")
@@ -101,9 +93,7 @@ def _prompt_model_selection(
                 break
 
     if default_choice:
-        choice = Prompt.ask(
-            "Choice", choices=list(model_map.keys()), default=default_choice
-        )
+        choice = Prompt.ask("Choice", choices=list(model_map.keys()), default=default_choice)
     else:
         choice = Prompt.ask("Choice", choices=list(model_map.keys()))
 
@@ -247,9 +237,7 @@ def _prompt_for_field(
                 default_choice = str(choices.index(effective_value) + 1)
 
             choice_map = {str(i): c for i, c in enumerate(choices, 1)}
-            selected = Prompt.ask(
-                "Choice", choices=list(choice_map.keys()), default=default_choice
-            )
+            selected = Prompt.ask("Choice", choices=list(choice_map.keys()), default=default_choice)
             return field_id, choice_map[selected]
         # No choices defined, fall through to text
 
@@ -372,9 +360,7 @@ def configure_provider(
         if field_id in cli_overrides and cli_overrides[field_id] is not None:
             collected_config[field_id] = cli_overrides[field_id]
             if not non_interactive:
-                console.print(
-                    f"\n[bold]{field['display_name']}[/bold]: {cli_overrides[field_id]}"
-                )
+                console.print(f"\n[bold]{field['display_name']}[/bold]: {cli_overrides[field_id]}")
             continue
 
         # In non-interactive mode, use env var or existing config value
@@ -389,9 +375,7 @@ def configure_provider(
             continue
 
         # Prompt for the field (pass existing_config for defaults)
-        field_id, value = _prompt_for_field(
-            field, key_manager, collected_config, existing_config
-        )
+        field_id, value = _prompt_for_field(field, key_manager, collected_config, existing_config)
         if value is not None:
             collected_config[field_id] = value
 
@@ -400,9 +384,7 @@ def configure_provider(
     if "default_model" in cli_overrides:
         collected_config["default_model"] = cli_overrides["default_model"]
         if not non_interactive:
-            console.print(
-                f"\n[bold]Default Model[/bold]: {cli_overrides['default_model']}"
-            )
+            console.print(f"\n[bold]Default Model[/bold]: {cli_overrides['default_model']}")
     elif "deployment_name" in collected_config:
         # Azure OpenAI: deployment_name IS the model
         collected_config["default_model"] = collected_config["deployment_name"]
@@ -418,17 +400,13 @@ def configure_provider(
     else:
         # Get default model from existing config ONLY (no hard-coded provider defaults)
         # This ensures fresh configs require user to choose, while re-configs default to previous choice
-        default_model = (
-            existing_config.get("default_model") if existing_config else None
-        )
+        default_model = existing_config.get("default_model") if existing_config else None
 
         # Prompt for model selection
         # Pass collected_config so providers can connect to real servers for dynamic discovery
         console.print()
         console.print("[bold]Default Model[/bold]")
-        selected_model = _prompt_model_selection(
-            provider_id, default_model, collected_config
-        )
+        selected_model = _prompt_model_selection(provider_id, default_model, collected_config)
         if selected_model:
             collected_config["default_model"] = selected_model
 
@@ -445,9 +423,7 @@ def configure_provider(
         if field_id in cli_overrides and cli_overrides[field_id] is not None:
             collected_config[field_id] = cli_overrides[field_id]
             if not non_interactive:
-                console.print(
-                    f"\n[bold]{field['display_name']}[/bold]: {cli_overrides[field_id]}"
-                )
+                console.print(f"\n[bold]{field['display_name']}[/bold]: {cli_overrides[field_id]}")
             continue
 
         # In non-interactive mode, use env var or existing config value
@@ -462,9 +438,7 @@ def configure_provider(
             continue
 
         # Prompt for the field (pass existing_config for defaults)
-        field_id, value = _prompt_for_field(
-            field, key_manager, collected_config, existing_config
-        )
+        field_id, value = _prompt_for_field(field, key_manager, collected_config, existing_config)
         if value is not None:
             collected_config[field_id] = value
 

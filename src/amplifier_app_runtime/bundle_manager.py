@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from amplifier_foundation import Bundle, PreparedBundle
+    from amplifier_foundation import Bundle
     from amplifier_foundation.registry import BundleRegistry
 
 logger = logging.getLogger(__name__)
@@ -51,6 +51,10 @@ class BundleManager:
         self._registry: BundleRegistry | None = None
         self._initialized = False
 
+        # Two-tier cache for bundle reuse across sessions
+        self._bundle_cache: dict[str, Any] = {}  # uri -> Bundle
+        self._prepared_cache: dict[str, Any] = {}  # cache_key -> PreparedBundle
+
     async def initialize(self) -> None:
         """Initialize by importing foundation and creating registry."""
         if self._initialized:
@@ -82,8 +86,12 @@ class BundleManager:
         behaviors: list[str] | None = None,
         provider_config: dict[str, Any] | None = None,
         working_directory: Path | None = None,
-    ) -> PreparedBundle:
+    ) -> Any:  # PreparedBundle
         """Load a bundle, compose behaviors, inject provider config, and prepare.
+
+        NOW WITH TWO-TIER CACHING:
+        - Level 1: Cache loaded bundles by URI
+        - Level 2: Cache prepared bundles by (name, behaviors, provider_hash)
 
         Args:
             bundle_name: Bundle to load (e.g., "foundation", "amplifier-dev")
@@ -97,10 +105,17 @@ class BundleManager:
         await self.initialize()
 
         from amplifier_foundation import Bundle
-        from amplifier_foundation.registry import load_bundle
 
-        # Load the base bundle
-        bundle = await load_bundle(bundle_name, registry=self._registry)
+        # Generate cache key for prepared bundle (L2 cache check)
+        cache_key = self._make_cache_key(bundle_name, behaviors, provider_config)
+
+        # Check prepared cache first (fast path)
+        if cache_key in self._prepared_cache:
+            logger.debug(f"Using cached prepared bundle: {cache_key}")
+            return self._prepared_cache[cache_key]
+
+        # Load the base bundle (with L1 cache)
+        bundle = await self._load_bundle_cached(bundle_name)
         logger.info(f"Loaded bundle: {bundle_name}")
 
         # Compose with behaviors if specified
@@ -113,7 +128,7 @@ class BundleManager:
                     behavior_ref = f"foundation:behaviors/{behavior_name}"
 
                 try:
-                    behavior_bundle = await load_bundle(behavior_ref, registry=self._registry)
+                    behavior_bundle = await self._load_bundle_cached(behavior_ref)
                     bundle = bundle.compose(behavior_bundle)
                     logger.info(f"Composed behavior: {behavior_name}")
                 except Exception as e:
@@ -142,9 +157,12 @@ class BundleManager:
             if provider_bundle:
                 bundle = bundle.compose(provider_bundle)
 
-        # Prepare the bundle
+        # Prepare the bundle (expensive: downloads dependencies)
         prepared = await bundle.prepare()
-        logger.info(f"Bundle prepared: {bundle_name}")
+
+        # Cache the prepared bundle (L2 cache)
+        self._prepared_cache[cache_key] = prepared
+        logger.info(f"Bundle prepared and cached: {cache_key}")
 
         return prepared
 
@@ -495,25 +513,104 @@ class BundleManager:
             uri=bundle_data.get("source"),
         )
 
-    async def invalidate_cache(self) -> None:
-        """Invalidate bundle/module cache.
+    async def _load_bundle_cached(self, bundle_uri: str) -> Any:  # Bundle
+        """Load bundle with Level 1 caching.
 
-        Called when module loading fails due to dependency issues.
+        Args:
+            bundle_uri: Bundle URI to load
+
+        Returns:
+            Loaded Bundle object
         """
+        if bundle_uri not in self._bundle_cache:
+            from amplifier_foundation.registry import load_bundle
+
+            bundle = await load_bundle(bundle_uri, registry=self._registry)
+            self._bundle_cache[bundle_uri] = bundle
+            logger.debug(f"Loaded and cached bundle: {bundle_uri}")
+        else:
+            logger.debug(f"Using cached bundle: {bundle_uri}")
+        return self._bundle_cache[bundle_uri]
+
+    def _make_cache_key(
+        self,
+        bundle_name: str,
+        behaviors: list[str] | None,
+        provider_config: dict[str, Any] | None,
+    ) -> str:
+        """Generate cache key for prepared bundle.
+
+        Key format: {bundle}:{behaviors_hash}:{provider_hash}
+        Different configs = different cache entries
+
+        Args:
+            bundle_name: Base bundle name
+            behaviors: Optional behavior list
+            provider_config: Optional provider config
+
+        Returns:
+            Cache key string
+        """
+        import hashlib
+        import json
+
+        parts = [bundle_name]
+
+        # Hash behaviors list
+        if behaviors:
+            behaviors_str = ",".join(sorted(behaviors))
+            behaviors_hash = hashlib.md5(behaviors_str.encode()).hexdigest()[:8]
+            parts.append(behaviors_hash)
+        else:
+            parts.append("no-behaviors")
+
+        # Hash provider config
+        if provider_config:
+            config_str = json.dumps(provider_config, sort_keys=True)
+            config_hash = hashlib.md5(config_str.encode()).hexdigest()[:8]
+            parts.append(config_hash)
+        else:
+            parts.append("no-provider")
+
+        return ":".join(parts)
+
+    def get_cache_stats(self) -> dict[str, Any]:
+        """Get cache statistics for monitoring.
+
+        Returns:
+            Dict with cache sizes and keys
+        """
+        return {
+            "bundle_cache_size": len(self._bundle_cache),
+            "prepared_cache_size": len(self._prepared_cache),
+            "bundle_cache_keys": list(self._bundle_cache.keys()),
+            "prepared_cache_keys": list(self._prepared_cache.keys()),
+        }
+
+    def invalidate_cache(self, bundle_uri: str | None = None) -> None:
+        """Invalidate bundle cache.
+
+        Args:
+            bundle_uri: Specific bundle to invalidate, or None for all
+        """
+        if bundle_uri:
+            # Invalidate specific bundle
+            self._bundle_cache.pop(bundle_uri, None)
+            # Invalidate all prepared bundles using this bundle
+            to_remove = [k for k in self._prepared_cache if k.startswith(bundle_uri + ":")]
+            for key in to_remove:
+                self._prepared_cache.pop(key)
+            logger.info(f"Invalidated cache for bundle: {bundle_uri}")
+        else:
+            # Invalidate all
+            self._bundle_cache.clear()
+            self._prepared_cache.clear()
+            logger.info("Invalidated all bundle caches")
+
+        # Also clear the registry's cache if available
         try:
-            # Clear the registry's cache
             if self._registry and hasattr(self._registry, "clear_cache"):
-                self._registry.clear_cache()
-                logger.info("Cleared bundle registry cache")
-
-            # Also clear foundation's module cache if available
-            try:
-                from amplifier_foundation.module_resolver import clear_module_cache
-
-                clear_module_cache()
-                logger.info("Cleared module resolver cache")
-            except (ImportError, AttributeError):
-                pass
-
+                self._registry.clear_cache()  # type: ignore[attr-defined]
+                logger.debug("Cleared bundle registry cache")
         except Exception as e:
-            logger.warning(f"Failed to invalidate cache: {e}")
+            logger.debug(f"Registry cache clear not available: {e}")

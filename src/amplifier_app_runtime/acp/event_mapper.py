@@ -80,6 +80,10 @@ class AmplifierToAcpEventMapper:
         repr=False,
     )
 
+    # Recipe plan state (for tracking step progress)
+    _current_plan: list[PlanEntry] = field(default_factory=list, init=False)
+    _recipe_session_id: str | None = field(default=None, init=False)
+
     def map_event(self, event: Any) -> EventMapResult:
         """Map an Amplifier event to an ACP session update.
 
@@ -137,6 +141,12 @@ class AmplifierToAcpEventMapper:
             "thinking:delta": self._handle_thinking,
             "thinking:final": self._handle_thinking,
             "thinking:start": self._handle_thinking,
+            # Recipe event handlers (Phase 1: ready for future events)
+            "recipe:session:start": self._handle_recipe_session_start,
+            "recipe:step:start": self._handle_recipe_step_start,
+            "recipe:step:complete": self._handle_recipe_step_complete,
+            "recipe:approval:pending": self._handle_recipe_approval_pending,
+            "recipe:session:complete": self._handle_recipe_session_complete,
         }
         return handlers.get(event_type)
 
@@ -271,3 +281,176 @@ class AmplifierToAcpEventMapper:
         if text:
             return EventMapResult(update=update_agent_thought(text_block(text)))
         return EventMapResult()
+
+    # =========================================================================
+    # Recipe event handlers (Phase 1: Ready for future recipe events)
+    # =========================================================================
+
+    def _handle_recipe_session_start(self, props: dict[str, Any]) -> EventMapResult:
+        """Handle recipe:session:start - create initial plan.
+
+        Maps recipe steps to ACP plan entries with pending status.
+
+        Expected props:
+            session_id: str - Recipe session ID
+            recipe_name: str - Recipe name
+            steps: list[dict] - Step definitions with name, agent, status
+
+        Returns:
+            EventMapResult with AgentPlanUpdate
+        """
+        steps = props.get("steps", [])
+        if not steps:
+            return EventMapResult()
+
+        # Store recipe session ID for tracking
+        self._recipe_session_id = props.get("session_id")
+
+        # Create plan entries for all steps
+        entries = []
+        for i, step in enumerate(steps):
+            step_name = step.get("name", f"step_{i + 1}")
+            agent = step.get("agent", "unknown")
+            status = step.get("status", "pending")
+
+            # Normalize status
+            if status not in ("pending", "in_progress", "completed"):
+                status = "pending"
+
+            entries.append(
+                PlanEntry(
+                    content=f"{i + 1}. {step_name} ({agent})",
+                    status=status,
+                    priority="medium",
+                )
+            )
+
+        # Cache plan state for updates
+        self._current_plan = entries
+
+        update = AgentPlanUpdate(
+            session_update="plan",
+            entries=entries,
+        )
+
+        logger.debug(f"Recipe session started: {props.get('recipe_name')} with {len(steps)} steps")
+
+        return EventMapResult(update=update)
+
+    def _handle_recipe_step_start(self, props: dict[str, Any]) -> EventMapResult:
+        """Handle recipe:step:start - update specific step to in_progress.
+
+        Expected props:
+            session_id: str - Recipe session ID
+            step_index: int - Index of step starting
+            step_name: str - Name of step
+
+        Returns:
+            EventMapResult with updated plan
+        """
+        step_index = props.get("step_index", 0)
+
+        # Update plan item status
+        if 0 <= step_index < len(self._current_plan):
+            self._current_plan[step_index].status = "in_progress"
+
+        update = AgentPlanUpdate(
+            session_update="plan",
+            entries=list(self._current_plan),
+        )
+
+        logger.debug(f"Recipe step {step_index} started: {props.get('step_name')}")
+
+        return EventMapResult(update=update)
+
+    def _handle_recipe_step_complete(self, props: dict[str, Any]) -> EventMapResult:
+        """Handle recipe:step:complete - mark step as completed.
+
+        Expected props:
+            session_id: str - Recipe session ID
+            step_index: int - Index of completed step
+            step_name: str - Name of step
+            result: str - Step result (optional)
+
+        Returns:
+            EventMapResult with updated plan
+        """
+        step_index = props.get("step_index", 0)
+
+        # Update plan item status
+        if 0 <= step_index < len(self._current_plan):
+            self._current_plan[step_index].status = "completed"
+
+        update = AgentPlanUpdate(
+            session_update="plan",
+            entries=list(self._current_plan),
+        )
+
+        logger.debug(f"Recipe step {step_index} completed: {props.get('step_name')}")
+
+        return EventMapResult(update=update)
+
+    def _handle_recipe_approval_pending(self, props: dict[str, Any]) -> EventMapResult:
+        """Handle recipe:approval:pending - signal approval gate reached.
+
+        Uses AgentPlanUpdate to show current progress and sends an agent
+        message notifying about the approval requirement.
+
+        Expected props:
+            session_id: str - Recipe session ID
+            stage_name: str - Stage waiting for approval
+            prompt: str - Approval prompt text
+            timeout_seconds: int - Timeout (optional)
+
+        Returns:
+            EventMapResult with plan update + approval notification
+        """
+        stage_name = props.get("stage_name", "stage")
+        prompt = props.get("prompt", "Approve to continue?")
+
+        # Send plan update with current state
+        plan_update = AgentPlanUpdate(
+            session_update="plan",
+            entries=list(self._current_plan),
+        )
+
+        # Log approval pending
+        logger.info(f"Recipe approval pending: {stage_name} - {prompt}")
+
+        return EventMapResult(update=plan_update)
+
+    def _handle_recipe_session_complete(self, props: dict[str, Any]) -> EventMapResult:
+        """Handle recipe:session:complete - mark all remaining steps completed.
+
+        Expected props:
+            session_id: str - Recipe session ID
+            status: str - Completion status (success/failure/cancelled)
+            total_steps: int - Total steps executed
+            duration_seconds: float - Execution duration
+
+        Returns:
+            EventMapResult with final plan state
+        """
+        status = props.get("status", "success")
+
+        # Mark all remaining steps as completed (in_progress or pending)
+        for entry in self._current_plan:
+            if entry.status != "completed":
+                entry.status = "completed"
+
+        update = AgentPlanUpdate(
+            session_update="plan",
+            entries=list(self._current_plan),
+        )
+
+        logger.info(
+            f"Recipe session completed: {status} "
+            f"({props.get('total_steps', 0)} steps, "
+            f"{props.get('duration_seconds', 0):.1f}s)"
+        )
+
+        # Clear plan state
+        self._current_plan = []
+        self._recipe_session_id = None
+
+        return EventMapResult(update=update)

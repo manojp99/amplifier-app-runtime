@@ -27,8 +27,6 @@ from .transport.base import Event
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Coroutine
 
-    from amplifier_foundation import PreparedBundle
-
 logger = logging.getLogger(__name__)
 
 
@@ -121,13 +119,13 @@ class ManagedSession:
 
         # Internal state
         self._amplifier_session: Any = None  # AmplifierSession when loaded
-        self._prepared_bundle: PreparedBundle | None = None
+        self._prepared_bundle: Any = None  # PreparedBundle when loaded
         self._lock = asyncio.Lock()
         self._cancel_event = asyncio.Event()
 
     async def initialize(
         self,
-        prepared_bundle: PreparedBundle | None = None,
+        prepared_bundle: Any = None,  # PreparedBundle
         initial_transcript: list[dict[str, Any]] | None = None,
     ) -> None:
         """Initialize the Amplifier session.
@@ -229,7 +227,7 @@ class ManagedSession:
 
     async def _create_amplifier_session(
         self,
-        prepared_bundle: PreparedBundle,
+        prepared_bundle: Any,  # PreparedBundle
         initial_transcript: list[dict[str, Any]] | None = None,
     ) -> None:
         """Create AmplifierSession from prepared bundle.
@@ -617,6 +615,116 @@ class ManagedSession:
         if self._streaming_hook:
             self._streaming_hook.set_send_fn(send_fn)
 
+    async def inject_context(
+        self,
+        content: str,
+        role: str = "user",
+    ) -> None:
+        """Inject context into session without executing.
+
+        Useful for feeding external events (notifications, webhooks) into
+        session context before execution.
+
+        Args:
+            content: Content to inject
+            role: Message role (user, system, assistant)
+
+        Raises:
+            RuntimeError: If session not initialized or context unavailable
+        """
+        async with self._lock:
+            if not self._amplifier_session:
+                raise RuntimeError(
+                    f"Session {self.session_id} not initialized. Call initialize() first."
+                )
+
+            try:
+                # Get context module from coordinator
+                context = self._amplifier_session.coordinator.get("context")
+                if context and hasattr(context, "add_message"):
+                    await context.add_message({"role": role, "content": content})
+
+                    # Also track in local messages
+                    self._messages.append(
+                        {
+                            "role": role,
+                            "content": content,
+                            "timestamp": datetime.now(UTC).isoformat(),
+                        }
+                    )
+
+                    logger.debug(
+                        f"Injected {role} message into session {self.session_id}: {content[:50]}..."
+                    )
+                else:
+                    raise RuntimeError(
+                        "Context module not available or doesn't support add_message"
+                    )
+            except Exception as e:
+                logger.error(f"Failed to inject context: {e}")
+                raise
+
+    async def clear_context(self, preserve_system: bool = True) -> None:
+        """Clear conversation context from session.
+
+        Resets session to clean state, keeping only system prompt.
+        Useful for stateless operations (scoring, classification) where
+        each request should be independent.
+
+        Args:
+            preserve_system: If True, keep system prompt (default)
+
+        Raises:
+            RuntimeError: If session not initialized or context unavailable
+        """
+        async with self._lock:
+            if not self._amplifier_session:
+                raise RuntimeError(
+                    f"Session {self.session_id} not initialized. Call initialize() first."
+                )
+
+            try:
+                # Get context module from coordinator
+                context = self._amplifier_session.coordinator.get("context")
+                if not context:
+                    raise RuntimeError("Context module not available")
+
+                if preserve_system:
+                    # Save system prompt
+                    system_msg = None
+                    if hasattr(context, "get_messages"):
+                        messages = await context.get_messages()
+                        system_msgs = [m for m in messages if m.get("role") == "system"]
+                        if system_msgs:
+                            system_msg = system_msgs[0]
+
+                    # Clear all messages
+                    if hasattr(context, "set_messages"):
+                        await context.set_messages([system_msg] if system_msg else [])
+                    elif hasattr(context, "clear"):
+                        await context.clear()
+                        if system_msg and hasattr(context, "add_message"):
+                            await context.add_message(system_msg)
+
+                    logger.debug(
+                        f"Cleared context for session {self.session_id} (preserved system)"
+                    )
+                else:
+                    # Clear everything
+                    if hasattr(context, "set_messages"):
+                        await context.set_messages([])
+                    elif hasattr(context, "clear"):
+                        await context.clear()
+
+                    logger.debug(f"Cleared all context for session {self.session_id}")
+
+                # Clear local message history
+                self._messages = []
+
+            except Exception as e:
+                logger.error(f"Failed to clear context: {e}")
+                raise
+
     def get_transcript(self) -> list[dict[str, Any]]:
         """Get the conversation transcript."""
         return list(self._messages)
@@ -656,16 +764,19 @@ class SessionManager:
     - Concurrent session support
     - Session persistence via SessionStore
     - Bundle management via BundleManager
+    - Hook extensibility via HookRegistry
     """
 
     def __init__(
         self,
         store: SessionStore | None = None,
+        hook_registry: Any = None,  # HookRegistry
     ) -> None:
         """Initialize session manager.
 
         Args:
             store: Optional session store for persistence
+            hook_registry: Optional hook registry for extensibility
         """
         import os
         from pathlib import Path
@@ -691,6 +802,11 @@ class SessionManager:
         self._active: dict[str, ManagedSession] = {}
         self._bundle_manager: Any = None
         self._lock = asyncio.Lock()
+
+        # Hook registry for extensibility
+        from .hooks import HookRegistry
+
+        self._hook_registry = hook_registry or HookRegistry()
 
     async def _get_bundle_manager(self) -> Any:
         """Get or create the bundle manager."""
@@ -1033,6 +1149,157 @@ class SessionManager:
                 await session.cleanup()
 
         return len(to_remove)
+
+    async def inject_context(
+        self,
+        session_id: str,
+        content: str,
+        role: str = "user",
+    ) -> None:
+        """Inject context into a session without executing.
+
+        Convenience wrapper around ManagedSession.inject_context()
+
+        Args:
+            session_id: Session ID
+            content: Content to inject
+            role: Message role (user, system, assistant)
+
+        Raises:
+            ValueError: If session not found
+        """
+        session = await self.get(session_id)
+        if not session:
+            raise ValueError(f"Session not found: {session_id}")
+
+        await session.inject_context(content, role)
+
+    async def clear_context(self, session_id: str, preserve_system: bool = True) -> None:
+        """Clear conversation context from a session.
+
+        Convenience wrapper around ManagedSession.clear_context()
+
+        Args:
+            session_id: Session ID
+            preserve_system: If True, keep system prompt
+
+        Raises:
+            ValueError: If session not found
+        """
+        session = await self.get(session_id)
+        if not session:
+            raise ValueError(f"Session not found: {session_id}")
+
+        await session.clear_context(preserve_system)
+
+    @property
+    def hooks(self) -> Any:  # HookRegistry
+        """Get the hook registry."""
+        return self._hook_registry
+
+    async def start_hooks(self) -> None:
+        """Start all registered hooks."""
+        await self._hook_registry.start_all(self)
+
+    async def stop_hooks(self) -> None:
+        """Stop all registered hooks."""
+        await self._hook_registry.stop_all()
+
+    async def create_minimal(
+        self,
+        session_id: str | None = None,
+        system_prompt: str | None = None,
+        send_fn: Callable[[Event], Coroutine[Any, Any, None]] | None = None,
+    ) -> ManagedSession:
+        """Create minimal session optimized for fast JSON responses.
+
+        Creates lightweight session with:
+        - Fast provider (Claude Haiku)
+        - Minimal system prompt
+        - No behaviors
+        - Short max_tokens (300)
+
+        Ideal for scoring, classification, simple Q&A.
+
+        Args:
+            session_id: Optional session ID (generated if not provided)
+            system_prompt: Optional custom system prompt
+            send_fn: Optional function to send events to client
+
+        Returns:
+            The created ManagedSession
+        """
+        import uuid
+
+        session_id = session_id or f"sess_minimal_{uuid.uuid4().hex[:12]}"
+
+        # Default minimal system prompt
+        if system_prompt is None:
+            system_prompt = (
+                "You are a helpful AI assistant. "
+                "Provide concise, accurate responses. "
+                "For structured data, respond with valid JSON only."
+            )
+
+        # Create minimal config
+        config = SessionConfig(
+            bundle="foundation",
+            behaviors=[],  # No behaviors
+            show_thinking=False,  # No thinking blocks
+        )
+
+        # Create session
+        session = ManagedSession(
+            session_id=session_id,
+            config=config,
+            send_fn=send_fn,
+            store=None,  # No persistence for minimal sessions
+        )
+
+        async with self._lock:
+            self._active[session_id] = session
+
+        # Get bundle manager
+        manager = await self._get_bundle_manager()
+
+        # Create minimal provider config (Haiku for speed/cost)
+        provider_config = {
+            "module": "provider-anthropic",
+            "source": "git+https://github.com/microsoft/amplifier-module-provider-anthropic@main",
+            "config": {
+                "model": "claude-haiku-3-5-20241022",
+                "max_tokens": 300,  # Short responses only
+            },
+        }
+
+        # Load foundation bundle with minimal config
+        # This will use cached prepared bundle if available
+        prepared_bundle = await manager.load_and_prepare(
+            bundle_name="foundation",
+            behaviors=[],  # No behaviors
+            provider_config=provider_config,
+        )
+
+        # Initialize session
+        await session.initialize(prepared_bundle=prepared_bundle)
+
+        # Override system prompt if provided
+        if system_prompt:
+            try:
+                context = session._amplifier_session.coordinator.get("context")
+                if context and hasattr(context, "set_messages"):
+                    # Get current messages and replace system message
+                    messages = await context.get_messages()
+                    non_system = [m for m in messages if m.get("role") != "system"]
+                    await context.set_messages(
+                        [{"role": "system", "content": system_prompt}] + non_system
+                    )
+                    logger.debug(f"Set custom system prompt for session {session_id}")
+            except Exception as e:
+                logger.warning(f"Failed to set custom system prompt: {e}")
+
+        logger.info(f"Created minimal session {session_id}")
+        return session
 
     @property
     def store(self) -> SessionStore | None:

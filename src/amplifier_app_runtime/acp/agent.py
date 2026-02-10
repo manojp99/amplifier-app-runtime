@@ -1356,6 +1356,16 @@ async def run_stdio_agent() -> None:
     """
     from acp import run_agent  # type: ignore[import-untyped]
 
+    # Register recipe tools in host registry
+    try:
+        from ..host_tools import host_tool_registry
+        from .recipe_integration import setup_recipe_tools
+
+        await setup_recipe_tools(host_tool_registry)
+        logger.debug("Recipe tools registered in host registry")
+    except Exception as e:
+        logger.warning(f"Failed to register recipe tools: {e}")
+
     agent = AmplifierAgent()
     logger.info("Starting Amplifier ACP agent (stdio mode)")
     await run_agent(agent)
