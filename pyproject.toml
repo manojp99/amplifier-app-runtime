@@ -28,6 +28,9 @@ dependencies = [
     "amplifier-core",
     "amplifier-foundation",
     "agent-client-protocol>=0.7.1",
+    # Essential runtime modules (orchestrator + context)
+    "amplifier-module-loop-streaming",
+    "amplifier-module-context-simple",
     # Provider modules bundled with the runtime
     "amplifier-module-provider-anthropic",
     "amplifier-module-provider-openai",
@@ -79,6 +82,8 @@ amplifier-module-provider-azure-openai = { git = "https://github.com/microsoft/a
 amplifier-module-provider-gemini = { git = "https://github.com/microsoft/amplifier-module-provider-gemini", branch = "main" }
 amplifier-module-provider-ollama = { git = "https://github.com/microsoft/amplifier-module-provider-ollama", branch = "main" }
 amplifier-module-provider-vllm = { git = "https://github.com/microsoft/amplifier-module-provider-vllm", branch = "main" }
+amplifier-module-loop-streaming = { git = "https://github.com/microsoft/amplifier-module-loop-streaming", branch = "main" }
+amplifier-module-context-simple = { git = "https://github.com/microsoft/amplifier-module-context-simple", branch = "main" }
 
 [tool.ruff]
 line-length = 100

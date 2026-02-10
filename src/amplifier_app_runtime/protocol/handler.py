@@ -209,12 +209,15 @@ class CommandHandler:
 
                 from ..bundle_manager import BundleManager
 
-                # Start with a base bundle (foundation provides orchestrator, tools, etc.)
-                base_bundle_name = bundle_definition.get("base", "foundation")
-                bundle = await load_bundle(base_bundle_name)
+                # Ensure session defaults (orchestrator + context)
+                session_config = bundle_definition.get("session", {})
+                if "orchestrator" not in session_config:
+                    session_config["orchestrator"] = "loop-streaming"
+                if "context" not in session_config:
+                    session_config["context"] = "context-simple"
 
-                # Create overlay bundle with runtime customizations
-                overlay = Bundle(
+                # Create bundle from definition
+                bundle = Bundle(
                     name=bundle_definition.get("name", "runtime-bundle"),
                     version=bundle_definition.get("version", "1.0.0"),
                     description=bundle_definition.get("description", ""),
@@ -224,11 +227,13 @@ class CommandHandler:
                     agents=bundle_definition.get("agents", {}),
                     instruction=bundle_definition.get("instructions")
                     or bundle_definition.get("instruction"),
-                    session=bundle_definition.get("session", {}),
+                    session=session_config,
                 )
 
-                # Compose: base + overlay (overlay wins on conflicts)
-                bundle = bundle.compose(overlay)
+                # If user explicitly requests a base bundle, compose on top
+                if "base" in bundle_definition:
+                    base = await load_bundle(bundle_definition["base"])
+                    bundle = base.compose(bundle)
 
                 # Auto-detect provider if not specified
                 if not bundle_definition.get("providers"):

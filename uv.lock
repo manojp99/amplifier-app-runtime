@@ -48,6 +48,8 @@ dependencies = [
     { name = "agent-client-protocol" },
     { name = "amplifier-core" },
     { name = "amplifier-foundation" },
+    { name = "amplifier-module-context-simple" },
+    { name = "amplifier-module-loop-streaming" },
     { name = "amplifier-module-provider-anthropic" },
     { name = "amplifier-module-provider-azure-openai" },
     { name = "amplifier-module-provider-gemini" },
@@ -87,6 +89,8 @@ requires-dist = [
     { name = "aioquic", marker = "extra == 'http3'", specifier = ">=1.0.0" },
     { name = "amplifier-core", git = "https://github.com/microsoft/amplifier-core?branch=main" },
     { name = "amplifier-foundation", git = "https://github.com/microsoft/amplifier-foundation?branch=main" },
+    { name = "amplifier-module-context-simple", git = "https://github.com/microsoft/amplifier-module-context-simple?branch=main" },
+    { name = "amplifier-module-loop-streaming", git = "https://github.com/microsoft/amplifier-module-loop-streaming?branch=main" },
     { name = "amplifier-module-provider-anthropic", git = "https://github.com/microsoft/amplifier-module-provider-anthropic?branch=main" },
     { name = "amplifier-module-provider-azure-openai", git = "https://github.com/microsoft/amplifier-module-provider-azure-openai?branch=main" },
     { name = "amplifier-module-provider-gemini", git = "https://github.com/microsoft/amplifier-module-provider-gemini?branch=main" },
@@ -136,6 +140,16 @@ dependencies = [
     { name = "amplifier-core" },
     { name = "pyyaml" },
 ]
+
+[[package]]
+name = "amplifier-module-context-simple"
+version = "1.0.0"
+source = { git = "https://github.com/microsoft/amplifier-module-context-simple?branch=main#54ca117e925cb4607e37f0618a56502430c8b070" }
+
+[[package]]
+name = "amplifier-module-loop-streaming"
+version = "1.0.0"
+source = { git = "https://github.com/microsoft/amplifier-module-loop-streaming?branch=main#38adf0514ae9310a0b9c7efda25a743fafbecddb" }
 
 [[package]]
 name = "amplifier-module-provider-anthropic"
