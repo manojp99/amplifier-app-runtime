@@ -173,48 +173,54 @@ class TestBundleManagerListBundles:
 class TestBundleManagerCache:
     """Tests for cache invalidation."""
 
-    @pytest.mark.asyncio
-    async def test_invalidate_cache_clears_registry(self) -> None:
-        """invalidate_cache clears registry cache if available."""
+    def test_invalidate_cache_clears_all(self) -> None:
+        """invalidate_cache clears both bundle and prepared caches."""
+        manager = BundleManager()
+
+        # Populate both caches
+        manager._bundle_cache["foundation"] = "mock"
+        manager._prepared_cache["foundation:a:b"] = "mock"
+
+        manager.invalidate_cache()
+
+        assert len(manager._bundle_cache) == 0
+        assert len(manager._prepared_cache) == 0
+
+    def test_invalidate_cache_specific_bundle(self) -> None:
+        """invalidate_cache can target specific bundle."""
+        manager = BundleManager()
+
+        # Populate caches
+        manager._bundle_cache["foundation"] = "mock1"
+        manager._bundle_cache["recipes"] = "mock2"
+        manager._prepared_cache["foundation:a:b"] = "mock3"
+        manager._prepared_cache["recipes:c:d"] = "mock4"
+
+        # Invalidate only foundation
+        manager.invalidate_cache("foundation")
+
+        # Foundation removed, recipes preserved
+        assert "foundation" not in manager._bundle_cache
+        assert "recipes" in manager._bundle_cache
+        assert "foundation:a:b" not in manager._prepared_cache
+        assert "recipes:c:d" in manager._prepared_cache
+
+    def test_invalidate_cache_with_registry(self) -> None:
+        """invalidate_cache also clears registry cache if available."""
         manager = BundleManager()
         mock_registry = MagicMock()
         mock_registry.clear_cache = MagicMock()
         manager._registry = mock_registry
 
-        await manager.invalidate_cache()
+        manager.invalidate_cache()
 
+        # Registry cache also cleared
         mock_registry.clear_cache.assert_called_once()
 
-    @pytest.mark.asyncio
-    async def test_invalidate_cache_no_registry(self) -> None:
-        """invalidate_cache handles no registry gracefully."""
+    def test_invalidate_cache_no_registry_graceful(self) -> None:
+        """invalidate_cache handles missing registry gracefully."""
         manager = BundleManager()
         manager._registry = None
 
         # Should not raise
-        await manager.invalidate_cache()
-
-    @pytest.mark.asyncio
-    async def test_invalidate_cache_no_clear_method(self) -> None:
-        """invalidate_cache handles missing clear_cache method."""
-        manager = BundleManager()
-        mock_registry = MagicMock(spec=[])  # No clear_cache
-        manager._registry = mock_registry
-
-        # Should not raise
-        await manager.invalidate_cache()
-
-    @pytest.mark.asyncio
-    async def test_invalidate_cache_exception_handling(self) -> None:
-        """invalidate_cache handles exceptions gracefully."""
-        manager = BundleManager()
-        mock_registry = MagicMock()
-        mock_registry.clear_cache = MagicMock(side_effect=RuntimeError("Cache error"))
-        manager._registry = mock_registry
-
-        # Should not raise - errors are caught and logged
-        try:
-            await manager.invalidate_cache()
-        except RuntimeError:
-            # If it does raise, the test catches it but notes it
-            pass  # Some implementations may propagate errors
+        manager.invalidate_cache()

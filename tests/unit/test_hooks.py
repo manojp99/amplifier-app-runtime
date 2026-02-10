@@ -1,465 +1,457 @@
-"""Unit tests for hooks protocol module.
-
-Tests the StreamingHook for event forwarding to clients.
-Minimal mocking - tests real code paths where possible.
-"""
+"""Tests for hook system."""
 
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock
 
 import pytest
 
-from amplifier_app_runtime.protocols.hooks import StreamingHook
-
-# =============================================================================
-# StreamingHook Initialization Tests
-# =============================================================================
+from amplifier_app_runtime.hooks import HookRegistry, InputHook, OutputHook
+from amplifier_app_runtime.session import SessionManager
 
 
-class TestStreamingHookInit:
-    """Tests for StreamingHook initialization."""
+class TestInputHook(InputHook):
+    """Test input hook implementation."""
 
-    def test_init_defaults(self) -> None:
-        """StreamingHook initializes with defaults."""
-        hook = StreamingHook()
-        assert hook._send is None
-        assert hook._show_thinking is True
-        assert hook._include_debug is False
-        assert hook._current_blocks == {}
+    name = "test_input"
 
-    def test_init_with_send_function(self) -> None:
-        """StreamingHook accepts send function."""
-        send_fn = AsyncMock()
-        hook = StreamingHook(send_fn=send_fn)
-        assert hook._send is send_fn
+    def __init__(self):
+        self.started = False
+        self.session_manager = None
+        self.items: list[dict[str, Any]] = []
 
-    def test_init_show_thinking_disabled(self) -> None:
-        """StreamingHook can disable thinking events."""
-        hook = StreamingHook(show_thinking=False)
-        assert hook._show_thinking is False
+    async def start(self, session_manager):
+        self.started = True
+        self.session_manager = session_manager
 
-    def test_init_include_debug(self) -> None:
-        """StreamingHook can enable debug events."""
-        hook = StreamingHook(include_debug=True)
-        assert hook._include_debug is True
+    async def stop(self):
+        self.started = False
 
-    def test_hook_has_name_and_priority(self) -> None:
-        """StreamingHook has name and priority attributes."""
-        assert StreamingHook.name == "streaming"
-        assert StreamingHook.priority == 100
+    async def poll(self):
+        return self.items
 
 
-# =============================================================================
-# StreamingHook Configuration Tests
-# =============================================================================
+class TestOutputHook(OutputHook):
+    """Test output hook implementation."""
+
+    name = "test_output"
+
+    def __init__(self):
+        self.started = False
+        self.session_manager = None
+        self.sent_events: list[tuple[str, dict[str, Any]]] = []
+
+    async def start(self, session_manager):
+        self.started = True
+        self.session_manager = session_manager
+
+    async def stop(self):
+        self.started = False
+
+    async def send(self, event, data):
+        self.sent_events.append((event, data))
+        return True
 
 
-class TestStreamingHookConfig:
-    """Tests for StreamingHook configuration methods."""
+class FilteredOutputHook(OutputHook):
+    """Output hook that filters events."""
 
-    def test_set_show_thinking(self) -> None:
-        """set_show_thinking updates thinking display setting."""
-        hook = StreamingHook(show_thinking=True)
-        hook.set_show_thinking(False)
-        assert hook._show_thinking is False
+    name = "filtered_output"
 
-    def test_set_include_debug(self) -> None:
-        """set_include_debug updates debug event inclusion."""
-        hook = StreamingHook(include_debug=False)
-        hook.set_include_debug(True)
-        assert hook._include_debug is True
+    def __init__(self):
+        self.sent_events: list[tuple[str, dict[str, Any]]] = []
 
-    def test_set_send_function(self) -> None:
-        """set_send_function updates send function."""
-        hook = StreamingHook()
-        send_fn = AsyncMock()
-        hook.set_send_function(send_fn)
-        assert hook._send is send_fn
+    async def start(self, session_manager):
+        pass
 
+    async def stop(self):
+        pass
 
-# =============================================================================
-# StreamingHook Call Tests
-# =============================================================================
+    async def send(self, event, data):
+        self.sent_events.append((event, data))
+        return True
+
+    def should_handle(self, event, data):
+        # Only handle "notification" events
+        return event == "notification"
 
 
-class TestStreamingHookCall:
-    """Tests for StreamingHook __call__ method."""
+class TestHookRegistration:
+    """Test hook registration and listing."""
 
-    @pytest.mark.asyncio
-    async def test_call_returns_continue_action(self) -> None:
-        """Calling hook returns continue action."""
-        hook = StreamingHook(send_fn=AsyncMock())
-        result = await hook("content_block:delta", {"delta": "test"})
-        assert result == {"action": "continue"}
+    def test_register_input_hook(self):
+        """Test registering an input hook."""
+        registry = HookRegistry()
+        hook = TestInputHook()
 
-    @pytest.mark.asyncio
-    async def test_call_without_send_fn_returns_continue(self) -> None:
-        """Calling hook without send function returns continue."""
-        hook = StreamingHook()
-        result = await hook("content_block:delta", {"delta": "test"})
-        assert result == {"action": "continue"}
+        registry.register(hook)
 
-    @pytest.mark.asyncio
-    async def test_call_sends_event(self) -> None:
-        """Calling hook sends event via send function."""
-        send_fn = AsyncMock()
-        hook = StreamingHook(send_fn=send_fn)
+        assert "test_input" in registry._hooks
+        assert hook in registry._input_hooks
 
-        await hook("content_block:start", {"block_type": "text", "block_index": 0})
+    def test_register_output_hook(self):
+        """Test registering an output hook."""
+        registry = HookRegistry()
+        hook = TestOutputHook()
 
-        send_fn.assert_called_once()
+        registry.register(hook)
 
-    @pytest.mark.asyncio
-    async def test_call_handles_send_error(self) -> None:
-        """Calling hook handles send errors gracefully."""
-        send_fn = AsyncMock(side_effect=RuntimeError("Send failed"))
-        hook = StreamingHook(send_fn=send_fn)
+        assert "test_output" in registry._hooks
+        assert hook in registry._output_hooks
+
+    def test_register_duplicate_raises(self):
+        """Test registering duplicate hook raises ValueError."""
+        registry = HookRegistry()
+        hook1 = TestInputHook()
+        hook2 = TestInputHook()
+
+        registry.register(hook1)
+
+        with pytest.raises(ValueError, match="already registered"):
+            registry.register(hook2)
+
+    def test_unregister_hook(self):
+        """Test unregistering a hook."""
+        registry = HookRegistry()
+        hook = TestInputHook()
+
+        registry.register(hook)
+        assert "test_input" in registry._hooks
+
+        registry.unregister("test_input")
+        assert "test_input" not in registry._hooks
+        assert hook not in registry._input_hooks
+
+    def test_unregister_nonexistent_is_noop(self):
+        """Test unregistering nonexistent hook doesn't raise."""
+        registry = HookRegistry()
 
         # Should not raise
-        result = await hook("content_block:delta", {"delta": "test"})
-        assert result == {"action": "continue"}
+        registry.unregister("nonexistent")
+
+    def test_list_hooks(self):
+        """Test listing registered hooks."""
+        registry = HookRegistry()
+
+        input_hook = TestInputHook()
+        output_hook = TestOutputHook()
+
+        registry.register(input_hook)
+        registry.register(output_hook)
+
+        hooks = registry.list_hooks()
+
+        assert len(hooks) == 2
+        assert any(h["name"] == "test_input" and h["is_input"] for h in hooks)
+        assert any(h["name"] == "test_output" and h["is_output"] for h in hooks)
 
 
-# =============================================================================
-# StreamingHook Content Block Events Tests
-# =============================================================================
-
-
-class TestStreamingHookContentBlocks:
-    """Tests for content block event handling."""
-
-    @pytest.mark.asyncio
-    async def test_content_block_start_maps_type(self) -> None:
-        """content_block:start maps to content_start."""
-        events_sent: list[dict[str, Any]] = []
-
-        async def capture(event: Any) -> None:
-            events_sent.append({"type": event.type, "props": event.properties})
-
-        hook = StreamingHook(send_fn=capture)
-
-        await hook("content_block:start", {"block_type": "text", "block_index": 0})
-
-        assert len(events_sent) == 1
-        assert events_sent[0]["props"]["type"] == "content_start"
-        assert events_sent[0]["props"]["block_type"] == "text"
+class TestHookLifecycle:
+    """Test hook lifecycle management."""
 
     @pytest.mark.asyncio
-    async def test_content_block_delta_extracts_text(self) -> None:
-        """content_block:delta extracts delta text."""
-        events_sent: list[dict[str, Any]] = []
+    async def test_start_all_hooks(self):
+        """Test starting all registered hooks."""
+        registry = HookRegistry()
+        session_manager = SessionManager()
 
-        async def capture(event: Any) -> None:
-            events_sent.append(event.properties)
+        hook1 = TestInputHook()
+        hook2 = TestOutputHook()
 
-        hook = StreamingHook(send_fn=capture)
+        registry.register(hook1)
+        registry.register(hook2)
 
-        # Start block first
-        await hook("content_block:start", {"block_type": "text", "block_index": 0})
-        events_sent.clear()
+        assert not hook1.started
+        assert not hook2.started
 
-        # Then delta
-        await hook("content_block:delta", {"delta": {"text": "Hello"}, "block_index": 0})
+        await registry.start_all(session_manager)
 
-        assert len(events_sent) == 1
-        assert events_sent[0]["type"] == "content_delta"
-        # Note: delta contains the sanitized original data due to **sanitized spread
-        assert events_sent[0]["delta"] == {"text": "Hello"}
-
-    @pytest.mark.asyncio
-    async def test_content_block_end_extracts_content(self) -> None:
-        """content_block:end extracts final content."""
-        events_sent: list[dict[str, Any]] = []
-
-        async def capture(event: Any) -> None:
-            events_sent.append(event.properties)
-
-        hook = StreamingHook(send_fn=capture)
-
-        # Start and end block
-        await hook("content_block:start", {"block_type": "text", "block_index": 0})
-        events_sent.clear()
-
-        await hook(
-            "content_block:end",
-            {"block": {"text": "Complete content"}, "block_index": 0},
-        )
-
-        assert len(events_sent) == 1
-        assert events_sent[0]["type"] == "content_end"
-        assert events_sent[0]["content"] == "Complete content"
+        assert hook1.started
+        assert hook2.started
+        assert hook1.session_manager is session_manager
+        assert hook2.session_manager is session_manager
 
     @pytest.mark.asyncio
-    async def test_tracks_block_types(self) -> None:
-        """Hook tracks block types by index."""
-        hook = StreamingHook(send_fn=AsyncMock())
+    async def test_stop_all_hooks(self):
+        """Test stopping all registered hooks."""
+        registry = HookRegistry()
+        session_manager = SessionManager()
 
-        await hook("content_block:start", {"block_type": "text", "block_index": 0})
-        await hook("content_block:start", {"block_type": "tool_use", "block_index": 1})
+        hook = TestInputHook()
+        registry.register(hook)
 
-        assert hook._current_blocks[0] == "text"
-        assert hook._current_blocks[1] == "tool_use"
+        await registry.start_all(session_manager)
+        assert hook.started
 
-    @pytest.mark.asyncio
-    async def test_clears_block_on_end(self) -> None:
-        """Hook clears block tracking on end."""
-        hook = StreamingHook(send_fn=AsyncMock())
-
-        await hook("content_block:start", {"block_type": "text", "block_index": 0})
-        assert 0 in hook._current_blocks
-
-        await hook("content_block:end", {"block_index": 0})
-        assert 0 not in hook._current_blocks
-
-
-# =============================================================================
-# StreamingHook Thinking Events Tests
-# =============================================================================
-
-
-class TestStreamingHookThinking:
-    """Tests for thinking event handling."""
+        await registry.stop_all()
+        assert not hook.started
 
     @pytest.mark.asyncio
-    async def test_thinking_block_sent_when_enabled(self) -> None:
-        """Thinking blocks sent when show_thinking=True."""
-        events_sent: list[str] = []
+    async def test_start_continues_on_error(self):
+        """Test start_all continues if a hook fails to start."""
+        registry = HookRegistry()
+        session_manager = SessionManager()
 
-        async def capture(event: Any) -> None:
-            events_sent.append(event.properties.get("type"))
+        # Hook that raises on start
+        class FailingHook(InputHook):
+            name = "failing_hook"
 
-        hook = StreamingHook(send_fn=capture, show_thinking=True)
+            async def start(self, session_manager):
+                raise RuntimeError("Start failed")
 
-        await hook("content_block:start", {"block_type": "thinking", "block_index": 0})
+            async def stop(self):
+                pass
 
-        assert "content_start" in events_sent
+            async def poll(self):
+                return []
 
-    @pytest.mark.asyncio
-    async def test_thinking_block_skipped_when_disabled(self) -> None:
-        """Thinking blocks skipped when show_thinking=False."""
-        events_sent: list[str] = []
+        failing_hook = FailingHook()
+        good_hook = TestInputHook()
 
-        async def capture(event: Any) -> None:
-            events_sent.append(event.properties.get("type"))
+        registry.register(failing_hook)
+        registry.register(good_hook)
 
-        hook = StreamingHook(send_fn=capture, show_thinking=False)
+        # Should not raise
+        await registry.start_all(session_manager)
 
-        await hook("content_block:start", {"block_type": "thinking", "block_index": 0})
-        await hook("content_block:delta", {"delta": {"text": "..."}, "block_index": 0})
-        await hook("content_block:end", {"block_index": 0})
+        # Good hook should still start
+        assert good_hook.started
 
-        # Should not send any events for thinking blocks
-        assert len(events_sent) == 0
 
-    @pytest.mark.asyncio
-    async def test_thinking_delta_event(self) -> None:
-        """thinking:delta event sent when enabled."""
-        events_sent: list[str] = []
-
-        async def capture(event: Any) -> None:
-            events_sent.append(event.properties.get("type"))
-
-        hook = StreamingHook(send_fn=capture, show_thinking=True)
-
-        await hook("thinking:delta", {"thinking": "I am thinking..."})
-
-        assert "thinking_delta" in events_sent
+class TestInputHookPolling:
+    """Test input hook polling."""
 
     @pytest.mark.asyncio
-    async def test_thinking_delta_skipped_when_disabled(self) -> None:
-        """thinking:delta skipped when show_thinking=False."""
-        events_sent: list[str] = []
+    async def test_poll_inputs_empty(self):
+        """Test polling with no hooks returns empty list."""
+        registry = HookRegistry()
 
-        async def capture(event: Any) -> None:
-            events_sent.append(event.properties.get("type"))
-
-        hook = StreamingHook(send_fn=capture, show_thinking=False)
-
-        await hook("thinking:delta", {"thinking": "I am thinking..."})
-
-        assert len(events_sent) == 0
-
-
-# =============================================================================
-# StreamingHook Tool Events Tests
-# =============================================================================
-
-
-class TestStreamingHookTools:
-    """Tests for tool event handling."""
+        inputs = await registry.poll_inputs()
+        assert inputs == []
 
     @pytest.mark.asyncio
-    async def test_tool_pre_maps_to_tool_call(self) -> None:
-        """tool:pre maps to tool_call message."""
-        events_sent: list[dict[str, Any]] = []
+    async def test_poll_inputs_single_hook(self):
+        """Test polling single input hook."""
+        registry = HookRegistry()
+        hook = TestInputHook()
 
-        async def capture(event: Any) -> None:
-            events_sent.append(event.properties)
+        hook.items = [
+            {"content": "Message 1", "session_id": "sess1", "role": "user"},
+            {"content": "Message 2", "session_id": "sess2", "role": "user"},
+        ]
 
-        hook = StreamingHook(send_fn=capture)
+        registry.register(hook)
 
-        await hook(
-            "tool:pre",
-            {
-                "tool_name": "bash",
-                "tool_call_id": "call_123",
-                "tool_input": {"command": "ls"},
-            },
-        )
+        inputs = await registry.poll_inputs()
 
-        assert len(events_sent) == 1
-        assert events_sent[0]["type"] == "tool_call"
-        assert events_sent[0]["tool_name"] == "bash"
-        assert events_sent[0]["status"] == "pending"
+        assert len(inputs) == 2
+        assert inputs[0]["content"] == "Message 1"
+        assert inputs[1]["content"] == "Message 2"
 
     @pytest.mark.asyncio
-    async def test_tool_post_maps_to_tool_result(self) -> None:
-        """tool:post maps to tool_result message."""
-        events_sent: list[dict[str, Any]] = []
+    async def test_poll_inputs_multiple_hooks(self):
+        """Test polling multiple input hooks."""
+        registry = HookRegistry()
 
-        async def capture(event: Any) -> None:
-            events_sent.append(event.properties)
+        hook1 = TestInputHook()
+        hook1.name = "hook1"
+        hook1.items = [{"content": "From hook1"}]
 
-        hook = StreamingHook(send_fn=capture)
+        hook2 = TestInputHook()
+        hook2.name = "hook2"
+        hook2.items = [{"content": "From hook2"}]
 
-        await hook(
-            "tool:post",
-            {
-                "tool_name": "bash",
-                "tool_call_id": "call_123",
-                "result": {"output": "file.txt", "success": True},
-            },
-        )
+        registry.register(hook1)
+        registry.register(hook2)
 
-        assert len(events_sent) == 1
-        assert events_sent[0]["type"] == "tool_result"
-        assert events_sent[0]["tool_name"] == "bash"
-        assert events_sent[0]["success"] is True
+        inputs = await registry.poll_inputs()
 
-    @pytest.mark.asyncio
-    async def test_tool_error_event(self) -> None:
-        """tool:error maps to tool_error message."""
-        events_sent: list[dict[str, Any]] = []
-
-        async def capture(event: Any) -> None:
-            events_sent.append(event.properties)
-
-        hook = StreamingHook(send_fn=capture)
-
-        await hook("tool:error", {"tool_name": "bash", "error": "Command failed"})
-
-        assert len(events_sent) == 1
-        assert events_sent[0]["type"] == "tool_error"
-
-
-# =============================================================================
-# StreamingHook Sanitization Tests
-# =============================================================================
-
-
-class TestStreamingHookSanitization:
-    """Tests for data sanitization."""
+        assert len(inputs) == 2
+        contents = [item["content"] for item in inputs]
+        assert "From hook1" in contents
+        assert "From hook2" in contents
 
     @pytest.mark.asyncio
-    async def test_sanitizes_image_data(self) -> None:
-        """Large image data is sanitized."""
-        events_sent: list[dict[str, Any]] = []
+    async def test_poll_continues_on_error(self):
+        """Test poll_inputs continues if a hook fails."""
 
-        async def capture(event: Any) -> None:
-            events_sent.append(event.properties)
+        class FailingHook(InputHook):
+            name = "failing_hook"
 
-        hook = StreamingHook(send_fn=capture)
+            async def start(self, session_manager):
+                pass
 
-        # Send event with large base64 image
-        large_image = "a" * 2000  # > 1000 chars
-        await hook(
-            "content_block:start",
-            {
-                "block_type": "text",
-                "block_index": 0,
-                "image": {"type": "base64", "data": large_image},
-            },
-        )
+            async def stop(self):
+                pass
 
-        # Image should be sanitized
-        assert len(events_sent) == 1
-        image_data = events_sent[0].get("image", {})
-        if image_data:
-            assert image_data.get("data") == "[image data omitted]"
+            async def poll(self):
+                raise RuntimeError("Poll failed")
 
-    def test_sanitize_preserves_normal_data(self) -> None:
-        """Sanitization preserves normal data."""
-        hook = StreamingHook()
+        registry = HookRegistry()
 
-        data = {
-            "text": "Hello world",
-            "number": 42,
-            "nested": {"key": "value"},
-        }
+        failing_hook = FailingHook()
+        good_hook = TestInputHook()
+        good_hook.items = [{"content": "Success"}]
 
-        sanitized = hook._sanitize_for_transport(data)
+        registry.register(failing_hook)
+        registry.register(good_hook)
 
-        assert sanitized["text"] == "Hello world"
-        assert sanitized["number"] == 42
-        assert sanitized["nested"]["key"] == "value"
+        # Should not raise
+        inputs = await registry.poll_inputs()
+
+        # Should still get good hook's items
+        assert len(inputs) == 1
+        assert inputs[0]["content"] == "Success"
 
 
-# =============================================================================
-# StreamingHook Integration Tests
-# =============================================================================
-
-
-class TestStreamingHookIntegration:
-    """Integration-style tests for complete flows."""
+class TestOutputHookDispatching:
+    """Test output hook event dispatching."""
 
     @pytest.mark.asyncio
-    async def test_full_content_stream(self) -> None:
-        """Test complete content streaming flow."""
-        events_sent: list[dict[str, Any]] = []
+    async def test_dispatch_output_no_hooks(self):
+        """Test dispatching with no hooks returns empty dict."""
+        registry = HookRegistry()
 
-        async def capture(event: Any) -> None:
-            events_sent.append(event.properties)
+        results = await registry.dispatch_output("notification", {"message": "test"})
 
-        hook = StreamingHook(send_fn=capture)
-
-        # Simulate full streaming
-        await hook("content_block:start", {"block_type": "text", "block_index": 0})
-        await hook("content_block:delta", {"delta": {"text": "Hello"}, "block_index": 0})
-        await hook("content_block:delta", {"delta": {"text": " World"}, "block_index": 0})
-        await hook("content_block:end", {"block": {"text": "Hello World"}, "block_index": 0})
-
-        assert len(events_sent) == 4
-        assert events_sent[0]["type"] == "content_start"
-        assert events_sent[1]["type"] == "content_delta"
-        # Note: delta contains sanitized original data due to **sanitized spread
-        assert events_sent[1]["delta"] == {"text": "Hello"}
-        assert events_sent[2]["type"] == "content_delta"
-        assert events_sent[2]["delta"] == {"text": " World"}
-        assert events_sent[3]["type"] == "content_end"
-        assert events_sent[3]["content"] == "Hello World"
+        assert results == {}
 
     @pytest.mark.asyncio
-    async def test_tool_call_flow(self) -> None:
-        """Test complete tool call flow."""
-        events_sent: list[dict[str, Any]] = []
+    async def test_dispatch_output_single_hook(self):
+        """Test dispatching to single output hook."""
+        registry = HookRegistry()
+        hook = TestOutputHook()
 
-        async def capture(event: Any) -> None:
-            events_sent.append(event.properties)
+        registry.register(hook)
 
-        hook = StreamingHook(send_fn=capture)
+        results = await registry.dispatch_output("notification", {"message": "Test notification"})
 
-        # Tool call then result
-        await hook(
-            "tool:pre",
-            {"tool_name": "bash", "tool_call_id": "123", "tool_input": {"command": "ls"}},
-        )
-        await hook(
-            "tool:post",
-            {"tool_name": "bash", "tool_call_id": "123", "result": {"output": "files"}},
-        )
+        assert results == {"test_output": True}
+        assert len(hook.sent_events) == 1
+        assert hook.sent_events[0][0] == "notification"
+        assert hook.sent_events[0][1]["message"] == "Test notification"
 
-        assert len(events_sent) == 2
-        assert events_sent[0]["type"] == "tool_call"
-        assert events_sent[1]["type"] == "tool_result"
+    @pytest.mark.asyncio
+    async def test_dispatch_output_multiple_hooks(self):
+        """Test dispatching to multiple output hooks."""
+        registry = HookRegistry()
+
+        hook1 = TestOutputHook()
+        hook1.name = "hook1"
+
+        hook2 = TestOutputHook()
+        hook2.name = "hook2"
+
+        registry.register(hook1)
+        registry.register(hook2)
+
+        results = await registry.dispatch_output("event", {"data": "test"})
+
+        assert results == {"hook1": True, "hook2": True}
+        assert len(hook1.sent_events) == 1
+        assert len(hook2.sent_events) == 1
+
+    @pytest.mark.asyncio
+    async def test_dispatch_output_filtered(self):
+        """Test should_handle filters events correctly."""
+        registry = HookRegistry()
+
+        # Hook that only handles "notification" events
+        filtered_hook = FilteredOutputHook()
+        registry.register(filtered_hook)
+
+        # Dispatch notification - should handle
+        results1 = await registry.dispatch_output("notification", {"msg": "test"})
+        assert results1 == {"filtered_output": True}
+        assert len(filtered_hook.sent_events) == 1
+
+        # Dispatch different event - should not handle
+        results2 = await registry.dispatch_output("webhook", {"url": "test"})
+        assert results2 == {}
+        assert len(filtered_hook.sent_events) == 1  # Still 1, not 2
+
+    @pytest.mark.asyncio
+    async def test_dispatch_continues_on_error(self):
+        """Test dispatch_output continues if a hook fails."""
+
+        class FailingHook(OutputHook):
+            name = "failing_hook"
+
+            async def start(self, session_manager):
+                pass
+
+            async def stop(self):
+                pass
+
+            async def send(self, event, data):
+                raise RuntimeError("Send failed")
+
+        registry = HookRegistry()
+
+        failing_hook = FailingHook()
+        good_hook = TestOutputHook()
+
+        registry.register(failing_hook)
+        registry.register(good_hook)
+
+        # Should not raise
+        results = await registry.dispatch_output("event", {"data": "test"})
+
+        # Good hook succeeds, failing hook marked as failed
+        assert results["failing_hook"] is False
+        assert results["test_output"] is True
+
+
+class TestSessionManagerHooks:
+    """Test SessionManager hook integration."""
+
+    @pytest.mark.asyncio
+    async def test_session_manager_has_hooks_property(self):
+        """Test SessionManager exposes hooks property."""
+        manager = SessionManager()
+
+        assert hasattr(manager, "hooks")
+        assert isinstance(manager.hooks, HookRegistry)
+
+    @pytest.mark.asyncio
+    async def test_session_manager_start_hooks(self):
+        """Test SessionManager can start hooks."""
+        registry = HookRegistry()
+        hook = TestInputHook()
+        registry.register(hook)
+
+        manager = SessionManager(hook_registry=registry)
+
+        assert not hook.started
+
+        await manager.start_hooks()
+
+        assert hook.started
+        assert hook.session_manager is manager
+
+    @pytest.mark.asyncio
+    async def test_session_manager_stop_hooks(self):
+        """Test SessionManager can stop hooks."""
+        registry = HookRegistry()
+        hook = TestInputHook()
+        registry.register(hook)
+
+        manager = SessionManager(hook_registry=registry)
+
+        await manager.start_hooks()
+        assert hook.started
+
+        await manager.stop_hooks()
+        assert not hook.started
+
+    @pytest.mark.asyncio
+    async def test_custom_hook_registry(self):
+        """Test SessionManager accepts custom hook registry."""
+        custom_registry = HookRegistry()
+        hook = TestInputHook()
+        custom_registry.register(hook)
+
+        manager = SessionManager(hook_registry=custom_registry)
+
+        assert manager.hooks is custom_registry
+        assert "test_input" in manager.hooks._hooks
