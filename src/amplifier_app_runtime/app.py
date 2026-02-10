@@ -102,7 +102,8 @@ def create_app(*, use_protocol_routes: bool = True) -> Starlette:
     middleware = [
         Middleware(
             CORSMiddleware,
-            allow_origins=["http://localhost:*", "http://127.0.0.1:*"],
+            allow_origins=["*"],  # Allow all origins for local dev
+            allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
         ),
